@@ -2,7 +2,7 @@
   "expo": {
     "name": "Fuel Apply",
     "slug": "fuel-apply",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "orientation": "portrait",
     "scheme": "fuelapply",
     "userInterfaceStyle": "light",
@@ -17,113 +17,103 @@
     "web": {
       "bundler": "metro"
     },
-    "plugins": ["expo-secure-store"],
+    "plugins": [],
     "extra": {
-      "auth": {
-        "clientId": "YOUR_ENTRA_APP_CLIENT_ID"
-      },
       "excel": {
-        "workbookId": "YOUR_ONEDRIVE_EXCEL_ITEM_ID",
-        "worksheetName": "入力"
+        "fileId": "",
+        "period": ""
       },
       "machines": [
         {
           "id": "machine-1",
           "name": "機械A",
           "worksheetName": "軽油第12号様式(2)",
-          "hoursColumn": "H",
-          "minutesColumn": "I",
-          "fuelColumn": "J"
+          "previousMeterCell": "J7",
+          "currentMeterCell": "J42"
         },
         {
           "id": "machine-2",
           "name": "機械B",
           "worksheetName": "軽油第12号様式(2)",
-          "hoursColumn": "K",
-          "minutesColumn": "L",
-          "fuelColumn": "M"
+          "previousMeterCell": "M7",
+          "currentMeterCell": "M42"
         },
         {
           "id": "machine-3",
           "name": "機械C",
           "worksheetName": "軽油第12号様式(2)",
-          "hoursColumn": "N",
-          "minutesColumn": "O",
-          "fuelColumn": "P"
+          "previousMeterCell": "P7",
+          "currentMeterCell": "P42"
         },
         {
           "id": "machine-4",
           "name": "機械D",
           "worksheetName": "軽油第12号様式(2)",
-          "hoursColumn": "Q",
-          "minutesColumn": "R",
-          "fuelColumn": "S"
+          "previousMeterCell": "S7",
+          "currentMeterCell": "S42"
         },
         {
           "id": "machine-5",
           "name": "機械E",
           "worksheetName": "軽油第12号様式(2)",
-          "hoursColumn": "T",
-          "minutesColumn": "U",
-          "fuelColumn": "V"
+          "previousMeterCell": "V7",
+          "currentMeterCell": "V42"
         },
         {
           "id": "machine-6",
           "name": "機械F",
           "worksheetName": "軽油第12号様式(2)",
-          "hoursColumn": "W",
-          "minutesColumn": "X",
-          "fuelColumn": "Y"
+          "previousMeterCell": "Y7",
+          "currentMeterCell": "Y42"
         },
         {
           "id": "machine-7",
           "name": "機械G",
           "worksheetName": "軽油第12号様式(2) 2枚目",
-          "hoursColumn": "H",
-          "minutesColumn": "I",
-          "fuelColumn": "J"
+          "previousMeterCell": "J7",
+          "currentMeterCell": "J42"
         },
         {
           "id": "machine-8",
           "name": "機械H",
           "worksheetName": "軽油第12号様式(2) 2枚目",
-          "hoursColumn": "K",
-          "minutesColumn": "L",
-          "fuelColumn": "M"
+          "previousMeterCell": "M7",
+          "currentMeterCell": "M42"
         },
         {
           "id": "machine-9",
           "name": "機械I",
           "worksheetName": "軽油第12号様式(2) 2枚目",
-          "hoursColumn": "N",
-          "minutesColumn": "O",
-          "fuelColumn": "P"
+          "previousMeterCell": "P7",
+          "currentMeterCell": "P42"
         },
         {
           "id": "machine-10",
           "name": "機械J",
           "worksheetName": "軽油第12号様式(2) 2枚目",
-          "hoursColumn": "Q",
-          "minutesColumn": "R",
-          "fuelColumn": "S"
+          "previousMeterCell": "S7",
+          "currentMeterCell": "S42"
         },
         {
           "id": "machine-11",
           "name": "機械K",
           "worksheetName": "軽油第12号様式(2) 2枚目",
-          "hoursColumn": "T",
-          "minutesColumn": "U",
-          "fuelColumn": "V"
+          "previousMeterCell": "V7",
+          "currentMeterCell": "V42"
         },
         {
           "id": "machine-12",
           "name": "機械L",
           "worksheetName": "軽油第12号様式(2) 2枚目",
-          "hoursColumn": "W",
-          "minutesColumn": "X",
-          "fuelColumn": "Y"
+          "previousMeterCell": "Y7",
+          "currentMeterCell": "Y42"
         }
-      ]
+      ],
+      "google": {
+        "clientId": "YOUR_GOOGLE_WEB_CLIENT_ID",
+        "apiKey": "YOUR_GOOGLE_PICKER_API_KEY",
+        "appId": "YOUR_GOOGLE_CLOUD_PROJECT_NUMBER"
+      }
     }
   }
 }

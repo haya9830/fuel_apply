@@ -1,395 +1,616 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  FlatList,
   KeyboardAvoidingView,
   Platform,
   Pressable,
   SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
+import { connectionForSave, signOut } from "./src/auth";
+import { appConfig, validateAppConfig } from "./src/config";
+import { loadDraft, storeDraft } from "./src/draft-storage";
+import { DriveError, saveRecords } from "./src/excel";
+import {
+  createDraft,
+  isPeriod,
+  type Draft,
+  type MeterRecord,
+  prepareRecords,
+} from "./src/records";
+import { formatUsageValue, localToday } from "./src/validation";
 
-import { getAccessToken, getRedirectUri, signIn, signOut } from "./src/auth";
-import { appConfig, MachineConfig, validateAppConfig } from "./src/config";
-import { getMachineUsageCells, readMachineUsage, updateMachineUsage } from "./src/excel";
-import { parseUsageValue } from "./src/validation";
-
-const today = new Date().toISOString().slice(0, 10);
+const initialDraft = () =>
+  createDraft(
+    isPeriod(appConfig.excel.period)
+      ? appConfig.excel.period
+      : localToday().slice(0, 7),
+    appConfig.machines,
+  );
+const configError = validateAppConfig();
 
 export default function App() {
-  const configError = useMemo(() => validateAppConfig(), []);
-  const [accessToken, setAccessToken] = useState<string | null>(null);
-  const [selectedMachineId, setSelectedMachineId] = useState<string>(
-    appConfig.machines[0]?.id ?? "",
-  );
-  const [hoursInput, setHoursInput] = useState("");
-  const [minutesInput, setMinutesInput] = useState("");
-  const [fuelInput, setFuelInput] = useState("");
-  const [recordDate, setRecordDate] = useState(today);
+  const [draft, setDraft] = useState<Draft>(initialDraft);
+  const [ready, setReady] = useState(false);
+  const [storageError, setStorageError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(configError);
+  const [review, setReview] = useState<MeterRecord[] | null>(null);
+  const [overwrite, setOverwrite] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [currentRecord, setCurrentRecord] = useState<{
-    hours: unknown;
-    minutes: unknown;
-    fuel: unknown;
-  } | null>(null);
-  const [loadingRecord, setLoadingRecord] = useState(false);
-
-  const selectedMachine = appConfig.machines.find(
-    (machine) => machine.id === selectedMachineId,
-  );
-  const inputCells = useMemo(() => {
-    if (!selectedMachine) return null;
-    try {
-      return getMachineUsageCells(selectedMachine, recordDate);
-    } catch {
-      return null;
-    }
-  }, [recordDate, selectedMachine]);
+  const [savedIds, setSavedIds] = useState<string[]>([]);
+  const [draftStatus, setDraftStatus] = useState("下書きを読み込み中…");
+  const saveLock = useRef(false);
+  const writeQueue = useRef(Promise.resolve());
+  const revision = useRef(0);
 
   useEffect(() => {
-    if (configError) return;
-    getAccessToken(appConfig.auth.clientId)
-      .then(setAccessToken)
-      .catch(() => setAccessToken(null));
-  }, [configError]);
-
-  useEffect(() => {
-    if (!accessToken || !selectedMachine) {
-      setCurrentRecord(null);
-      return;
-    }
-
-    let cancelled = false;
-    setLoadingRecord(true);
-    readMachineUsage({
-      accessToken,
-      workbookId: appConfig.excel.workbookId,
-      machine: selectedMachine,
-      date: recordDate,
-    })
-      .then((record) => {
-        if (!cancelled) setCurrentRecord(record);
+    let active = true;
+    loadDraft(initialDraft())
+      .then((value) => {
+        if (active) {
+          setDraft(value);
+          setReady(true);
+        }
       })
       .catch(() => {
-        if (!cancelled) setCurrentRecord(null);
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingRecord(false);
+        if (active)
+          setStorageError(
+            "下書きを読み込めませんでした。端末の保存設定をご確認ください。新しく始める場合は下書きをリセットしてください。",
+          );
       });
-
     return () => {
-      cancelled = true;
+      active = false;
     };
-  }, [accessToken, selectedMachineId]);
+  }, []);
 
-  const handleSignIn = async () => {
-    setBusy(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const token = await signIn(appConfig.auth.clientId);
-      setAccessToken(token);
-      setMessage("Microsoftアカウントに接続しました。");
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "サインインに失敗しました。");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleSubmit = async () => {
-    if (!selectedMachine) {
-      setError("機械を選択してください。");
-      return;
-    }
-    const hours = parseUsageValue(hoursInput);
-    const minutes = parseUsageValue(minutesInput || "0");
-    const fuel = parseUsageValue(fuelInput);
-    if (hours === null || minutes === null || fuel === null) {
-      setError("稼働時間（時・分）と給油量に0以上の数値を入力してください。");
-      return;
-    }
-    if (minutes > 59 || !Number.isInteger(minutes)) {
-      setError("分は0〜59の整数で入力してください。");
-      return;
-    }
-    if (!recordDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
-      setError("日付はYYYY-MM-DD形式で入力してください。");
-      return;
-    }
-
-    setBusy(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const token = await getAccessToken(appConfig.auth.clientId);
-      if (!token) {
-        setAccessToken(null);
-        throw new Error("先にMicrosoftアカウントへサインインしてください。");
-      }
-
-      await updateMachineUsage({
-        accessToken: token,
-        workbookId: appConfig.excel.workbookId,
-        machine: selectedMachine,
-        hours,
-        minutes,
-        fuel,
-        date: recordDate,
+  useEffect(() => {
+    if (!ready) return;
+    const currentRevision = ++revision.current;
+    setDraftStatus("下書きを保存中…");
+    // Serialize native writes so an older write can never replace the latest draft.
+    writeQueue.current = writeQueue.current
+      .catch(() => {})
+      .then(() => storeDraft(draft))
+      .then(() => {
+        if (currentRevision === revision.current) {
+          setDraftStatus("下書きはこの端末に保存済み");
+          setStorageError(null);
+        }
+      })
+      .catch(() => {
+        if (currentRevision === revision.current) {
+          setDraftStatus("下書きを保存できません");
+          setStorageError(
+            "この端末に下書きを保存できません。画面を閉じると入力が失われる可能性があります。",
+          );
+        }
       });
-      setAccessToken(token);
-      setCurrentRecord({ hours, minutes, fuel });
-      setHoursInput("");
-      setMinutesInput("");
-      setFuelInput("");
-      setMessage(
-        `${selectedMachine.name}の${recordDate}の使用状況をExcelへ保存しました。`,
+  }, [draft, ready]);
+
+  function edit(next: Draft) {
+    setDraft(next);
+    setReview(null);
+    setError(null);
+    setMessage(null);
+    setOverwrite(false);
+  }
+  function reviewInput() {
+    try {
+      setReview(
+        prepareRecords(
+          draft,
+          appConfig.machines,
+          isPeriod(appConfig.excel.period)
+            ? appConfig.excel.period
+            : draft.period,
+        ),
       );
+      setError(null);
+      setMessage(null);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Excelへの保存に失敗しました。");
+      setError(
+        caught instanceof Error ? caught.message : "入力を確認してください。",
+      );
+    }
+  }
+  async function submit() {
+    if (saveLock.current || !review || configError) return;
+    saveLock.current = true;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      // Revalidate before opening sign-in; all cloud traffic starts here.
+      const records = prepareRecords(
+        draft,
+        appConfig.machines,
+        appConfig.excel.period || draft.period,
+      );
+      const connection = await connectionForSave();
+      const result = await saveRecords({
+        accessToken: connection.accessToken,
+        fileId: connection.fileId,
+        period: draft.period,
+        records,
+        overwrite,
+      });
+      setSavedIds((ids) => [...new Set([...ids, ...result.savedIds])]);
+      setDraft((current) => ({
+        ...current,
+        entries: Object.fromEntries(
+          Object.entries(current.entries).map(([id, entry]) => [
+            id,
+            result.savedIds.includes(id)
+              ? { ...entry, selected: false }
+              : entry,
+          ]),
+        ),
+      }));
+      setReview(null);
+      setOverwrite(false);
+      if (result.savedIds.length)
+        setMessage(
+          `${result.savedIds.length}台の月末アワーメーターをExcelに保存しました。`,
+        );
+    } catch (caught) {
+      if (caught instanceof DriveError && caught.status === 401)
+        await signOut();
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "保存できませんでした。通信を確認して再試行してください。",
+      );
     } finally {
       setBusy(false);
+      saveLock.current = false;
     }
-  };
-
-  const handleSignOut = async () => {
-    await signOut();
-    setAccessToken(null);
-    setMessage("サインアウトしました。");
-  };
+  }
+  const selected = Object.values(draft.entries).filter(
+    (e) => e.selected,
+  ).length;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={s.safe}>
       <StatusBar style="dark" />
       <KeyboardAvoidingView
-        style={styles.container}
+        style={s.flex}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
-        <FlatList
-          contentContainerStyle={styles.content}
-          data={appConfig.machines}
-          keyExtractor={(machine) => machine.id}
-          ListHeaderComponent={
-            <View>
-              <Text style={styles.eyebrow}>FUEL APPLY</Text>
-              <Text style={styles.title}>機械使用状況</Text>
-              <Text style={styles.subtitle}>
-                機械を選んで、今日の使用量をExcelへ記録します。
-              </Text>
-
-              <View style={styles.connectionCard}>
-                <View>
-                  <Text style={styles.cardLabel}>Excel接続</Text>
-                  <Text style={styles.cardValue}>
-                    {accessToken ? "接続済み" : "未接続"}
-                  </Text>
-                </View>
-                {accessToken ? (
-                  <Pressable style={styles.secondaryButton} onPress={handleSignOut}>
-                    <Text style={styles.secondaryButtonText}>サインアウト</Text>
-                  </Pressable>
-                ) : (
+        <ScrollView
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={s.scroll}
+        >
+          <View style={s.page}>
+            <View style={s.brand}>
+              <View style={s.brandMark}>
+                <Text style={s.brandLetter}>F</Text>
+              </View>
+              <Text style={s.brandText}>FUEL APPLY</Text>
+              <Text style={s.tag}>月末の記録</Text>
+            </View>
+            <Text style={s.title}>
+              今月のメーターを、{Platform.OS === "web" ? "\n" : ""}
+              まとめて記録。
+            </Text>
+            <Text style={s.subtitle}>
+              機械に表示されている累積時間を入力してください。{"\n"}
+              保存を押したときだけ、Excelに接続します。
+            </Text>
+            <View style={s.periodCard}>
+              <Text style={s.label}>対象月</Text>
+              <TextInput
+                accessibilityLabel="対象月"
+                editable={ready && !busy}
+                style={s.periodInput}
+                value={draft.period}
+                onChangeText={(period) => edit({ ...draft, period })}
+                placeholder="YYYY-MM"
+                maxLength={7}
+              />
+              <Text style={s.hint}>{draftStatus}</Text>
+            </View>
+            {configError && (
+              <View style={s.notice}>
+                <Text style={s.noticeTitle}>保存先の準備中</Text>
+                <Text style={s.noticeText}>{configError}</Text>
+              </View>
+            )}
+            {storageError && (
+              <View style={s.error}>
+                <Text style={s.errorText}>{storageError}</Text>
+                {!ready && (
                   <Pressable
-                    style={[styles.primaryButton, configError && styles.disabledButton]}
-                    onPress={handleSignIn}
-                    disabled={busy || Boolean(configError)}
+                    style={s.secondary}
+                    onPress={() => {
+                      setDraft(initialDraft());
+                      setReady(true);
+                    }}
                   >
-                    <Text style={styles.primaryButtonText}>Microsoftに接続</Text>
+                    <Text>下書きをリセットして始める</Text>
                   </Pressable>
                 )}
               </View>
-
-              {configError && (
-                <View style={styles.warningBox}>
-                  <Text style={styles.warningTitle}>初期設定が必要です</Text>
-                  <Text style={styles.warningText}>{configError}</Text>
-                  <Text style={styles.helperText}>リダイレクトURI: {getRedirectUri()}</Text>
-                </View>
-              )}
-
-              {error && (
-                <View style={styles.errorBox}>
-                  <Text style={styles.errorText}>{error}</Text>
-                </View>
-              )}
-              {message && (
-                <View style={styles.successBox}>
-                  <Text style={styles.successText}>{message}</Text>
-                </View>
-              )}
-
-              <Text style={styles.sectionTitle}>機械を選択</Text>
+            )}
+            <View style={s.sectionHeader}>
+              <Text style={s.sectionTitle}>機械のアワーメーター</Text>
+              <Text style={s.count}>
+                {selected} / {appConfig.machines.length} 台を選択
+              </Text>
             </View>
-          }
-          renderItem={({ item }: { item: MachineConfig }) => (
-            <Pressable
-              style={[styles.machineCard, selectedMachineId === item.id && styles.selectedMachineCard]}
-              onPress={() => {
-                setSelectedMachineId(item.id);
-                setError(null);
-                setMessage(null);
-              }}
-            >
-              <View>
-                <Text style={styles.machineName}>{item.name}</Text>
-              <Text style={styles.machineMeta}>
-                  {item.worksheetName} / 稼働時間・給油量
+            <Text style={s.hint}>
+              記録する機械にチェック。小数もそのまま入力できます。
+            </Text>
+            <View style={s.cards}>
+              {appConfig.machines.map((machine, index) => {
+                const entry = draft.entries[machine.id];
+                return (
+                  <View
+                    key={machine.id}
+                    style={[s.card, entry?.selected && s.cardSelected]}
+                  >
+                    <Pressable
+                      accessibilityRole="checkbox"
+                      accessibilityLabel={`${machine.name}を記録`}
+                      aria-checked={entry?.selected ?? false}
+                      aria-disabled={!ready || busy}
+                      disabled={!ready || busy}
+                      onPress={() =>
+                        edit({
+                          ...draft,
+                          entries: {
+                            ...draft.entries,
+                            [machine.id]: {
+                              ...entry,
+                              selected: !entry?.selected,
+                            },
+                          },
+                        })
+                      }
+                      style={s.cardHeader}
+                    >
+                      <View
+                        style={[s.check, entry?.selected && s.checkSelected]}
+                      >
+                        <Text style={s.checkText}>
+                          {entry?.selected ? "✓" : ""}
+                        </Text>
+                      </View>
+                      <View style={s.flex}>
+                        <Text style={s.machineNo}>
+                          MACHINE {String(index + 1).padStart(2, "0")}
+                        </Text>
+                        <Text style={s.machineName}>{machine.name}</Text>
+                      </View>
+                      {savedIds.includes(machine.id) && (
+                        <Text style={s.saved}>保存済み</Text>
+                      )}
+                    </Pressable>
+                    <Text style={s.label}>月末アワーメーター</Text>
+                    <View style={s.inputWrap}>
+                      <TextInput
+                        accessibilityLabel={`${machine.name}の月末アワーメーター`}
+                        editable={ready && !busy}
+                        style={s.meterInput}
+                        keyboardType="decimal-pad"
+                        value={entry?.current ?? ""}
+                        placeholder="0.0"
+                        placeholderTextColor="#98a69f"
+                        onChangeText={(current) => {
+                          setSavedIds((ids) =>
+                            ids.filter((id) => id !== machine.id),
+                          );
+                          edit({
+                            ...draft,
+                            entries: {
+                              ...draft.entries,
+                              [machine.id]: { selected: true, current },
+                            },
+                          });
+                        }}
+                      />
+                      <Text style={s.unit}>時間</Text>
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+            {review && (
+              <View style={s.review}>
+                <Text style={s.sectionTitle}>保存内容の確認</Text>
+                <Text style={s.reviewMonth}>
+                  {draft.period.replace("-", "年 ")}月 · {review.length}台
+                </Text>
+                {review.map((r) => (
+                  <View key={r.machine.id} style={s.reviewRow}>
+                    <Text style={s.reviewName}>{r.machine.name}</Text>
+                    <Text style={s.reviewValue}>
+                      {formatUsageValue(r.value)} 時間
+                    </Text>
+                  </View>
+                ))}
+                <Pressable
+                  accessibilityRole="checkbox"
+                  accessibilityLabel="入力済みの記録を上書き"
+                  aria-checked={overwrite}
+                  aria-disabled={busy}
+                  disabled={busy}
+                  style={s.overwrite}
+                  onPress={() => setOverwrite((v) => !v)}
+                >
+                  <View style={[s.check, overwrite && s.checkSelected]}>
+                    <Text style={s.checkText}>{overwrite ? "✓" : ""}</Text>
+                  </View>
+                  <Text style={s.overwriteText}>入力済みの記録を上書き</Text>
+                </Pressable>
+                <Text style={s.hint}>
+                  Googleで接続し、保存先のExcelを選びます。
                 </Text>
               </View>
-              <View style={[styles.radio, selectedMachineId === item.id && styles.radioSelected]}>
-                {selectedMachineId === item.id && <View style={styles.radioDot} />}
+            )}
+            {error && (
+              <View accessibilityRole="alert" style={s.error}>
+                <Text style={s.errorText}>{error}</Text>
               </View>
+            )}
+            {message && (
+              <View accessibilityRole="alert" style={s.success}>
+                <Text style={s.successText}>{message}</Text>
+              </View>
+            )}
+            <Pressable
+              accessibilityRole="button"
+              disabled={
+                !ready || busy || (Boolean(review) && Boolean(configError))
+              }
+              onPress={review ? submit : reviewInput}
+              style={[
+                s.primary,
+                (!ready || busy || (Boolean(review) && Boolean(configError))) &&
+                  s.disabled,
+              ]}
+            >
+              {busy ? (
+                <View style={s.busy}>
+                  <ActivityIndicator color="#fff" />
+                  <Text style={s.primaryText}>認証・Excelへの保存中…</Text>
+                </View>
+              ) : (
+                <Text style={s.primaryText}>
+                  {review
+                    ? `${review.length}台をExcelへ保存`
+                    : "入力内容を確認する"}
+                </Text>
+              )}
             </Pressable>
-          )}
-          ListFooterComponent={
-            <View style={styles.formCard}>
-              <Text style={styles.sectionTitle}>使用量を入力</Text>
-              <Text style={styles.selectedLabel}>
-                選択中: {selectedMachine?.name ?? "未選択"}
-              </Text>
-              <View style={styles.currentRecordBox}>
-                <Text style={styles.currentRecordLabel}>Excelの現在値</Text>
-                {loadingRecord ? (
-                  <ActivityIndicator color="#2563eb" size="small" />
-                ) : currentRecord ? (
-                  <Text style={styles.currentRecordValue}>
-                    {currentRecord.hours === null && currentRecord.minutes === null && currentRecord.fuel === null
-                      ? "未入力"
-                      : `稼働 ${String(currentRecord.hours ?? 0)}時間 ${String(currentRecord.minutes ?? 0)}分 / 給油 ${String(currentRecord.fuel ?? 0)}ℓ`}
-                  </Text>
-                ) : (
-                  <Text style={styles.currentRecordHint}>
-                    接続後にExcelの値を読み込みます
-                  </Text>
-                )}
-              </View>
-              <Text style={styles.inputLabel}>記録日</Text>
-              <TextInput
-                value={recordDate}
-                onChangeText={setRecordDate}
-                style={styles.input}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor="#9ca3af"
-                autoCapitalize="none"
-              />
-              <View style={styles.inputRow}>
-                <View style={styles.inputColumn}>
-                  <Text style={styles.inputLabel}>稼働時間（時）</Text>
-                  <TextInput
-                    value={hoursInput}
-                    onChangeText={setHoursInput}
-                    style={styles.numberInput}
-                    placeholder="例: 7"
-                    placeholderTextColor="#9ca3af"
-                    keyboardType="number-pad"
-                  />
-                </View>
-                <View style={styles.inputColumn}>
-                  <Text style={styles.inputLabel}>稼働時間（分）</Text>
-                  <TextInput
-                    value={minutesInput}
-                    onChangeText={setMinutesInput}
-                    style={styles.numberInput}
-                    placeholder="例: 30"
-                    placeholderTextColor="#9ca3af"
-                    keyboardType="number-pad"
-                  />
-                </View>
-              </View>
-              <Text style={styles.inputLabel}>給油量（ℓ）</Text>
-              <TextInput
-                value={fuelInput}
-                onChangeText={setFuelInput}
-                style={styles.usageInput}
-                placeholder="例: 120.5"
-                placeholderTextColor="#9ca3af"
-                keyboardType="decimal-pad"
-                returnKeyType="done"
-              />
+            {review && !busy && (
               <Pressable
-                style={[styles.saveButton, (busy || !selectedMachine) && styles.disabledButton]}
-                onPress={handleSubmit}
-                disabled={busy || !selectedMachine}
+                accessibilityRole="button"
+                style={s.secondary}
+                onPress={() => setReview(null)}
               >
-                {busy ? (
-                  <ActivityIndicator color="#ffffff" />
-                ) : (
-                  <Text style={styles.saveButtonText}>Excelへ保存する</Text>
-                )}
+                <Text style={s.secondaryText}>入力に戻る</Text>
               </Pressable>
-              <Text style={styles.footerNote}>
-                保存先: {selectedMachine && inputCells
-                  ? `${selectedMachine.worksheetName} / ${inputCells.hoursCell}, ${inputCells.minutesCell}, ${inputCells.fuelCell}`
-                  : "-"}
-              </Text>
-            </View>
-          }
-        />
+            )}
+            <Text style={s.footer}>
+              日別の稼働時間・給油量は、この画面では変更しません。{"\n"}
+              保存中はほかの端末でExcelを編集しないでください。{"\n"}
+              下書きはこの端末にのみ保存されます。
+            </Text>
+            <Pressable
+              disabled={busy}
+              onPress={async () => {
+                await signOut();
+                setMessage("この端末のGoogle接続を解除しました。");
+              }}
+              style={s.disconnect}
+            >
+              <Text style={s.hint}>Googleの接続を解除</Text>
+            </Pressable>
+          </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: "#f6f7fb" },
-  container: { flex: 1 },
-  content: { padding: 20, paddingBottom: 44 },
-  eyebrow: { color: "#2563eb", fontSize: 12, fontWeight: "800", letterSpacing: 2 },
-  title: { color: "#111827", fontSize: 30, fontWeight: "800", marginTop: 6 },
-  subtitle: { color: "#6b7280", fontSize: 15, lineHeight: 22, marginTop: 8, marginBottom: 20 },
-  connectionCard: {
+const s = StyleSheet.create({
+  flex: { flex: 1 },
+  safe: { flex: 1, backgroundColor: "#f4f6f2" },
+  scroll: { padding: 20, paddingBottom: 48, alignItems: "center" },
+  page: { width: "100%", maxWidth: 760 },
+  brand: {
+    flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#ffffff",
-    borderColor: "#e5e7eb",
+    gap: 10,
+    marginTop: 12,
+    marginBottom: 30,
+  },
+  brandMark: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    backgroundColor: "#245c44",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  brandLetter: { color: "#fff", fontSize: 20, fontWeight: "800" },
+  brandText: {
+    fontSize: 13,
+    letterSpacing: 2,
+    color: "#245c44",
+    fontWeight: "800",
+  },
+  tag: { marginLeft: "auto", color: "#697a6f", fontSize: 12 },
+  title: {
+    fontSize: 32,
+    lineHeight: 45,
+    fontWeight: "800",
+    color: "#193c2d",
+    letterSpacing: -0.5,
+  },
+  subtitle: {
+    marginTop: 14,
+    marginBottom: 24,
+    fontSize: 14,
+    color: "#5d7164",
+    lineHeight: 24,
+  },
+  periodCard: {
+    backgroundColor: "#e8eee6",
+    padding: 20,
+    borderRadius: 18,
+    marginBottom: 20,
+  },
+  label: { fontSize: 12, fontWeight: "600", color: "#607568", marginBottom: 8 },
+  periodInput: {
+    fontSize: 25,
+    fontWeight: "700",
+    color: "#214e38",
+    paddingVertical: 5,
+    marginBottom: 8,
+  },
+  hint: { fontSize: 12, color: "#6d7e73", lineHeight: 20 },
+  notice: {
+    padding: 16,
+    borderRadius: 14,
+    backgroundColor: "#fff4d9",
+    marginBottom: 20,
+  },
+  noticeTitle: { color: "#785b20", fontWeight: "700", marginBottom: 6 },
+  noticeText: { color: "#785b20", lineHeight: 21, fontSize: 13 },
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: 5,
+  },
+  sectionTitle: { color: "#234432", fontSize: 18, fontWeight: "700" },
+  count: { marginLeft: "auto", fontSize: 12, color: "#65786b" },
+  cards: { gap: 12, marginTop: 16, marginBottom: 24 },
+  card: {
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "#dce4da",
+    padding: 20,
+    borderRadius: 18,
+  },
+  cardSelected: { borderColor: "#59846b", backgroundColor: "#fdfffc" },
+  cardHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: 22,
+    minHeight: 44,
+  },
+  check: {
+    width: 23,
+    height: 23,
+    borderWidth: 1.5,
+    borderColor: "#a5b5a9",
+    borderRadius: 6,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  checkSelected: { backgroundColor: "#2d6749", borderColor: "#2d6749" },
+  checkText: { color: "#fff", fontSize: 16, fontWeight: "700" },
+  machineNo: {
+    fontSize: 10,
+    letterSpacing: 1.4,
+    color: "#7c8d80",
+    marginBottom: 4,
+  },
+  machineName: { fontSize: 17, fontWeight: "700", color: "#234432" },
+  saved: { color: "#2d6749", fontSize: 12 },
+  inputWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#f4f7f1",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#dce5d9",
+    paddingHorizontal: 14,
+  },
+  meterInput: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 29,
+    paddingVertical: 13,
+    color: "#193c2d",
+    fontWeight: "600",
+  },
+  unit: { color: "#758779", fontSize: 13, paddingLeft: 10 },
+  review: {
+    backgroundColor: "#fff",
     borderRadius: 18,
     borderWidth: 1,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 14,
-    padding: 16,
+    borderColor: "#b3c7b6",
+    padding: 20,
+    marginBottom: 20,
   },
-  cardLabel: { color: "#6b7280", fontSize: 12, fontWeight: "700" },
-  cardValue: { color: "#111827", fontSize: 16, fontWeight: "700", marginTop: 4 },
-  primaryButton: { backgroundColor: "#2563eb", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 11 },
-  primaryButtonText: { color: "#ffffff", fontSize: 13, fontWeight: "800" },
-  secondaryButton: { borderColor: "#d1d5db", borderRadius: 10, borderWidth: 1, paddingHorizontal: 14, paddingVertical: 10 },
-  secondaryButtonText: { color: "#374151", fontSize: 13, fontWeight: "700" },
-  disabledButton: { opacity: 0.5 },
-  warningBox: { backgroundColor: "#fffbeb", borderColor: "#fcd34d", borderRadius: 14, borderWidth: 1, marginBottom: 14, padding: 14 },
-  warningTitle: { color: "#92400e", fontSize: 14, fontWeight: "800" },
-  warningText: { color: "#92400e", fontSize: 13, lineHeight: 19, marginTop: 5 },
-  helperText: { color: "#a16207", fontSize: 11, marginTop: 8 },
-  errorBox: { backgroundColor: "#fef2f2", borderColor: "#fecaca", borderRadius: 14, borderWidth: 1, marginBottom: 14, padding: 14 },
-  errorText: { color: "#b91c1c", fontSize: 13, lineHeight: 19 },
-  successBox: { backgroundColor: "#ecfdf5", borderColor: "#a7f3d0", borderRadius: 14, borderWidth: 1, marginBottom: 14, padding: 14 },
-  successText: { color: "#047857", fontSize: 13, lineHeight: 19 },
-  sectionTitle: { color: "#111827", fontSize: 18, fontWeight: "800", marginBottom: 10, marginTop: 8 },
-  machineCard: { alignItems: "center", backgroundColor: "#ffffff", borderColor: "#e5e7eb", borderRadius: 16, borderWidth: 1, flexDirection: "row", justifyContent: "space-between", marginBottom: 10, padding: 16 },
-  selectedMachineCard: { backgroundColor: "#eff6ff", borderColor: "#60a5fa" },
-  machineName: { color: "#111827", fontSize: 16, fontWeight: "800" },
-  machineMeta: { color: "#6b7280", fontSize: 12, marginTop: 5 },
-  radio: { alignItems: "center", borderColor: "#9ca3af", borderRadius: 12, borderWidth: 2, height: 22, justifyContent: "center", width: 22 },
-  radioSelected: { borderColor: "#2563eb" },
-  radioDot: { backgroundColor: "#2563eb", borderRadius: 6, height: 10, width: 10 },
-  formCard: { backgroundColor: "#ffffff", borderColor: "#e5e7eb", borderRadius: 18, borderWidth: 1, marginTop: 12, padding: 18 },
-  selectedLabel: { color: "#2563eb", fontSize: 13, fontWeight: "700", marginBottom: 17 },
-  currentRecordBox: { backgroundColor: "#f0fdf4", borderColor: "#bbf7d0", borderRadius: 12, borderWidth: 1, marginBottom: 12, padding: 12 },
-  currentRecordLabel: { color: "#166534", fontSize: 11, fontWeight: "800" },
-  currentRecordValue: { color: "#166534", fontSize: 15, fontWeight: "800", marginTop: 4 },
-  currentRecordHint: { color: "#4d7c0f", fontSize: 12, marginTop: 4 },
-  inputLabel: { color: "#374151", fontSize: 13, fontWeight: "700", marginBottom: 7, marginTop: 8 },
-  input: { backgroundColor: "#f9fafb", borderColor: "#d1d5db", borderRadius: 11, borderWidth: 1, color: "#111827", fontSize: 16, paddingHorizontal: 14, paddingVertical: 12 },
-  inputRow: { flexDirection: "row", gap: 10 },
-  inputColumn: { flex: 1 },
-  numberInput: { backgroundColor: "#f9fafb", borderColor: "#d1d5db", borderRadius: 11, borderWidth: 1, color: "#111827", fontSize: 18, paddingHorizontal: 12, paddingVertical: 12 },
-  usageInput: { backgroundColor: "#f9fafb", borderColor: "#2563eb", borderRadius: 11, borderWidth: 2, color: "#111827", fontSize: 24, paddingHorizontal: 14, paddingVertical: 12 },
-  saveButton: { alignItems: "center", backgroundColor: "#111827", borderRadius: 12, justifyContent: "center", marginTop: 20, minHeight: 52 },
-  saveButtonText: { color: "#ffffff", fontSize: 15, fontWeight: "800" },
-  footerNote: { color: "#9ca3af", fontSize: 11, marginTop: 12, textAlign: "center" },
+  reviewMonth: {
+    fontSize: 13,
+    color: "#6d7e73",
+    marginTop: 8,
+    marginBottom: 12,
+  },
+  reviewRow: {
+    flexDirection: "row",
+    gap: 12,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderColor: "#e9eee6",
+  },
+  reviewName: { flex: 1, color: "#3f5647" },
+  reviewValue: { color: "#234432", fontWeight: "700" },
+  overwrite: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    minHeight: 48,
+    marginTop: 14,
+    marginBottom: 8,
+  },
+  overwriteText: { fontSize: 13, color: "#665f42", flexShrink: 1 },
+  error: {
+    padding: 16,
+    backgroundColor: "#ffede8",
+    borderRadius: 12,
+    marginBottom: 16,
+  },
+  errorText: { color: "#a43d27", lineHeight: 23, fontSize: 13 },
+  success: {
+    padding: 16,
+    backgroundColor: "#dfefdc",
+    borderRadius: 12,
+    marginBottom: 16,
+  },
+  successText: { color: "#285336", lineHeight: 23, fontSize: 14 },
+  primary: {
+    backgroundColor: "#245c44",
+    borderRadius: 14,
+    minHeight: 56,
+    padding: 15,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  primaryText: { color: "#fff", fontSize: 16, fontWeight: "700" },
+  disabled: { opacity: 0.45 },
+  busy: { flexDirection: "row", gap: 12, alignItems: "center" },
+  secondary: { padding: 16, minHeight: 48, alignItems: "center" },
+  secondaryText: { color: "#45634e", fontSize: 14 },
+  footer: {
+    marginTop: 18,
+    fontSize: 11,
+    lineHeight: 20,
+    textAlign: "center",
+    color: "#7a887d",
+  },
+  disconnect: { marginTop: 20, padding: 8, alignItems: "center" },
 });
